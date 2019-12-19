@@ -4,7 +4,7 @@
 ###############################################################################
 
 
-library(plyr); library(lme4);library(ggplot2)
+library(plyr); library(lme4);library(ggplot2); library(mfp)
 
 ## read the data
 k<-read.csv("C:/Users/lsalas/Desktop/Greg/Sensors/K.csv")
@@ -32,7 +32,12 @@ yobs<-read.csv("C:/Users/lsalas/Desktop/Greg/Sensors/y.csv")
 ##		Makes most sense because there is a general source effect, then there is an effect of where the sensor is in respect to the source (the covariance),
 ##		and finally there is also possibly a basic difference among sensors
 
-## We'll do the above with the data as-is
+########
+## After e-mail exchange with Greg, he seemed to indicate that all we needed to do was a simple regression
+## So, we call that option #4
+## 4) Do a simple regression
+
+## We'll do the above with the data as-is. However, Tasko said that the source slopes cannot be negative, so we must log source data too
 ## Then we'll repeat by using the log of yobs, and scaling the values in K
 
 ####################################################
@@ -45,6 +50,20 @@ yobsl<-merge(yobsl,sensornames,by="time",all.x=T)
 yobsl<-yobsl[,which(names(yobsl) != "time")]
 
 df<-merge(k,yobsl,by=c("tstamp","sensor"), all.x=T)
+
+##
+dfs<-df
+dfs[,3:13]<-scale(dfs[,3:13])
+library(bestNormalize)
+q<-orderNorm(dfs$yobs)
+dfs$yobs_on<-q$x.t
+ggplot(dfs,aes(y=yobs_on,x=reclaimers)) + geom_point() + geom_smooth(span=0.95,se=F)
+
+
+## But slopes cannot be negative, so applying log to covariates
+for(vv in names(df)[3:13]){
+	df[,vv]<-ifelse(df[,vv]==0,-9.5,log(df[,vv]))
+}
 
 ## This function makes it easier and clearer what's happening in approach #1 if not versed in regression analysis
 ## Later we may code this all using matrix algebra entirely
@@ -78,6 +97,46 @@ fitSingleModels<-function(dat,snames,resvar="yobs"){
 	return(list(models=mdls,results=resdf,pdf=pdf))
 }
 
+getmode <- function(v) {
+	uniqv <- unique(v)
+	uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+
+####################################################
+## Tasko's approach: yobs not logged, slopes must be > 0, and no intercept
+tfml<-as.formula(paste0("yobs ~ ",paste(names(k)[3:13], collapse=" + "), " - 1"))
+mdlt<-lm(tfml,data=df)
+tmres<-summary(mdlt)
+
+#reclaimers has a negative slope
+modevect<-apply(df[,3:13],2,getmode)
+newdf<-as.data.frame(matrix(sapply(modevect,FUN=function(x,i){return(rep(x,times=i))},i=nrow(df)),ncol=11))
+names(newdf)<-names(df[3:13])
+newdf$reclaimers<-df$reclaimers
+newdf$predicted<-predict(mdlt,newdata=newdf)
+
+for(nn in names(df[3:13])){
+	tdf<-data.frame(yobs=df$yobs)
+	tdf$Var<-df[,nn]
+	tdf$roundVar<-round(tdf$Var)
+	pdf<-aggregate(yobs~roundVar,tdf,max)
+	p<-ggplot(tdf,aes(x=Var,y=yobs)) + geom_point() + labs(x=nn,y="yobs")
+	plg<-ggplot(pdf,aes(x=roundVar,y=log(yobs))) + geom_point() + geom_smooth(method="loess",span= 0.9, se=F) + labs(x=nn,y="Log(yobs)")
+	dev.new();print(p);dev.new();print(plg)
+}
+
+
+pdf<-data.frame(yobs=df$yobs,yest=predict(mdlt),sensor=df$sensor)
+ggplot(data=pdf,aes(x=yobs,y=yest)) + geom_point(aes(color=sensor)) + geom_abline(slope=1,intercept=0,color="black")
+ggplot(data=pdf,aes(x=log(yobs),y=log(yest))) + geom_point(aes(color=sensor)) + geom_abline(slope=1,intercept=0,color="black")
+
+library(car)
+outlierTest(mdlt)
+qqPlot(mdlt, main="QQ Plot") 
+leveragePlots(mdlt)
+layout(matrix(c(1,2,3,4),2,2)) # optional 4 graphs/page
+plot(mdlt)
 
 ####################################################
 ## Approach #1
@@ -87,7 +146,7 @@ res1$results
 pdf<-res1$pdf
 ggplot(data=pdf,aes(x=yobs,y=yest)) + geom_point(aes(color=sensor)) + geom_abline(slope=1,intercept=0,color="black")
 ggplot(data=pdf,aes(x=log(yobs),y=log(yest))) + geom_point(aes(color=sensor)) + geom_abline(slope=1,intercept=0,color="black")
-e
+
 
 ####################################################
 ## Approach #2
@@ -107,9 +166,21 @@ ggplot(data=pdf,aes(x=log(yobs),y=log(yest))) + geom_point(aes(color=sensor)) + 
 ## Approach #3
 fefml<-as.formula(paste0("yobs ~ ",paste(paste0("sensor*",names(k)[3:13]),collapse=" + ")))
 mdl3<-lm(fefml,data=df)
-summary(mdl3)
+(smdl3<-summary(mdl3))
+as.data.frame(smdl3$coefficients)[1:12,1:2]
 
 pdf<-data.frame(yobs=df$yobs,yest=predict(mdl3),sensor=df$sensor)
+ggplot(data=pdf,aes(x=yobs,y=yest)) + geom_point(aes(color=sensor)) + geom_abline(slope=1,intercept=0,color="black")
+ggplot(data=pdf,aes(x=log(yobs),y=log(yest))) + geom_point(aes(color=sensor)) + geom_abline(slope=1,intercept=0,color="black")
+
+####################################################
+## Approach #4
+smfml<-as.formula(paste0("yobs ~ ",paste(names(k)[3:13], collapse=" + "), " + sensor"))
+mdl4<-lm(smfml,data=df)
+smres<-summary(mdl4)
+smres$coefficients
+
+pdf<-data.frame(yobs=df$yobs,yest=predict(mdl4),sensor=df$sensor)
 ggplot(data=pdf,aes(x=yobs,y=yest)) + geom_point(aes(color=sensor)) + geom_abline(slope=1,intercept=0,color="black")
 ggplot(data=pdf,aes(x=log(yobs),y=log(yest))) + geom_point(aes(color=sensor)) + geom_abline(slope=1,intercept=0,color="black")
 
@@ -151,13 +222,24 @@ ggplot(data=pdf,aes(x=logYobs,y=yest)) + geom_point(aes(color=sensor)) + geom_ab
 ## Approach #3 + log + scale
 fefml<-as.formula(paste0("logYobs ~ ",paste(paste0("sensor*",names(k)[3:13]),collapse=" + ")))
 mdl3s<-lm(fefml,data=dfs)
-summary(mdl3s)
+(smdl3s<-summary(mdl3s))
+as.data.frame(smdl3s$coefficients)[1:12,1:2]
 
 pdf<-data.frame(logYobs=dfs$logYobs,yest=predict(mdl3s),sensor=dfs$sensor)
 ggplot(data=pdf,aes(x=logYobs,y=yest)) + geom_point(aes(color=sensor)) + geom_abline(slope=1,intercept=0,color="black")
+ggplot(data=pdf,aes(x=logYobs,y=yest)) + geom_point(aes(color=sensor)) + geom_abline(slope=1,intercept=0,color="black") + geom_smooth(method="lm", formula=y~x,color="blue",se=F)
 
 
+####################################################
+## Approach #4 + log + scale
+smfml<-as.formula(paste0("logYobs ~ ",paste(names(k)[3:13], collapse=" + ")))
+mdl4s<-lm(smfml,data=dfs)
+smress<-summary(mdl4s)
+smress$coefficients
+exp(smress$coefficients[1:12])
 
+pdf<-data.frame(logYobs=dfs$logYobs,yest=predict(mdl4s),sensor=dfs$sensor)
+ggplot(data=pdf,aes(x=logYobs,y=yest)) + geom_point(aes(color=sensor)) + geom_abline(slope=1,intercept=0,color="black")
 
 
 
